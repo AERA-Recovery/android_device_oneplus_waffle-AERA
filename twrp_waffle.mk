@@ -39,4 +39,4 @@ PRODUCT_MANUFACTURER := oneplus
 PRODUCT_GMS_CLIENTID_BASE := android-oplus
 
 # Theme
-TW_STATUS_ICONS_ALIGN := center
+AERA_STATUS_ICONS_ALIGN := center

@@ -1,0 +1,304 @@
+#!/system/bin/sh
+# Copyright (C) 2026 AERA Recovery Project contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Mount the installed Waffle stock audio stack read-only and start the
+# services used by AERA's protected PAL playback path.
+
+PATH=/system/bin:/sbin
+export PATH
+stock_root=/mnt/aera-stock
+vendor_root=${stock_root}/vendor
+system_root=${stock_root}/system
+odm_root=${stock_root}/odm
+audio_abi=/vendor/aera-audio-abi
+lock=${stock_root}/.audio-lock
+slot_suffix="$(getprop ro.boot.slot_suffix)"
+audio_stage=bootstrap-start
+
+log_message() {
+    priority="$1"
+    shift
+    /system/bin/log -t AERA-Audio -p "${priority}" "$*" 2>/dev/null || \
+        echo "AERA-Audio: $*" >&2
+}
+
+set_stage() {
+    audio_stage="$1"
+    log_message i "stage=${audio_stage}"
+}
+
+fail() {
+    log_message e "FAILED stage=${audio_stage}: $*"
+    exit 1
+}
+
+set_stage validate-device
+case "$(getprop ro.product.device)" in
+    waffle|PJD110|CPH2573|CPH2581|CPH2583|OP595DL1|OP5929L1) ;;
+    *)
+        case "$(getprop ro.product.vendor.device)" in
+            waffle|PJD110|CPH2573|CPH2581|CPH2583|OP595DL1|OP5929L1) ;;
+            *) fail "this backend is only valid on Waffle/OnePlus 12" ;;
+        esac
+        ;;
+esac
+
+set_stage prepare-layout
+mkdir -p "${stock_root}" "${vendor_root}" "${system_root}" "${odm_root}" \
+    /odm/firmware /firmware \
+    /vendor/firmware_mnt /vendor/dsp /vendor/lib/rfsa/adsp \
+    /vendor/etc/acdbdata \
+    /vendor/etc/audio \
+    "${audio_abi}" /vendor/etc/seccomp_policy
+chmod 0755 "${stock_root}" /odm/firmware /vendor/lib /vendor/lib/rfsa
+lock_attempt=0
+while ! mkdir "${lock}" 2>/dev/null; do
+    [ "$(getprop init.svc.aera-agm-service)" = running ] && exit 0
+    lock_attempt=$((lock_attempt + 1))
+    [ "${lock_attempt}" -ge 300 ] && fail "another bootstrap did not finish"
+    sleep 0.1
+done
+trap 'rmdir "${lock}" 2>/dev/null' EXIT
+
+find_partition() {
+    part="$1"
+    for candidate in \
+        "/dev/block/mapper/${part}${slot_suffix}" \
+        "/dev/block/mapper/${part}_a" \
+        "/dev/block/mapper/${part}_b"; do
+        [ -b "${candidate}" ] && { echo "${candidate}"; return 0; }
+    done
+    return 1
+}
+
+mount_read_only() {
+    part="$1"
+    target="$2"
+    grep -q " ${target} " /proc/mounts && return 0
+    source=""
+    find_attempt=0
+    while [ -z "${source}" ] && [ "${find_attempt}" -lt 100 ]; do
+        source="$(find_partition "${part}")"
+        [ -n "${source}" ] && break
+        find_attempt=$((find_attempt + 1))
+        sleep 0.1
+    done
+    [ -n "${source}" ] || return 1
+    mount -t erofs -o ro "${source}" "${target}" 2>/dev/null || \
+        mount -t ext4 -o ro,noload "${source}" "${target}" 2>/dev/null
+}
+
+set_stage mount-stock-images
+mount_read_only vendor "${vendor_root}" || fail "could not mount stock vendor"
+mount_read_only system "${system_root}" || fail "could not mount stock system"
+mount_read_only odm "${odm_root}" || fail "could not mount stock odm"
+
+# The dedicated slot-matched DSP partition carries AudioPD modules. Android
+# mounts it before audioadsprpcd starts and exposes the legacy /dsp alias.
+# Keep this after FBE/decryption, alongside the rest of the stock audio mounts.
+set_stage mount-dsp
+if ! grep -q ' /vendor/dsp ' /proc/mounts; then
+    dsp="/dev/block/bootdevice/by-name/dsp${slot_suffix}"
+    [ -b "${dsp}" ] || dsp="/dev/block/by-name/dsp${slot_suffix}"
+    [ -b "${dsp}" ] || fail "the active DSP partition is missing"
+    mount -t ext4 -o ro,noload "${dsp}" /vendor/dsp || \
+        fail "could not mount the DSP module partition"
+fi
+[ -e /dsp ] || ln -s /vendor/dsp /dsp || \
+    fail "could not expose the stock /dsp path"
+
+# Qualcomm's audio processes are built against Waffle's framework Binder ABI.
+# Recovery bundles the matching Binder/C++ snapshot and overlays it with the
+# installed stock equivalents when available, without replacing /system.
+set_stage bind-framework-abi
+system_lib64="${system_root}/system/lib64"
+[ -f "${system_lib64}/libbinder.so" ] || system_lib64="${system_root}/lib64"
+bind_file_read_only() {
+    source_file="$1"
+    target_file="$2"
+    [ -f "${source_file}" ] || fail "missing stock file ${source_file}"
+    [ -e "${target_file}" ] || touch "${target_file}" || \
+        fail "could not create bind target ${target_file}"
+    if ! grep -q " ${target_file} " /proc/mounts; then
+        mount -o bind "${source_file}" "${target_file}" || \
+            fail "could not bind ${source_file}"
+        mount -o remount,bind,ro "${target_file}" 2>/dev/null
+    fi
+}
+bind_file_read_only "${system_lib64}/libbinder.so" \
+    "${audio_abi}/libbinder.so"
+bind_file_read_only "${system_lib64}/libbinder_ndk.so" \
+    "${audio_abi}/libbinder_ndk.so"
+bind_file_read_only "${system_lib64}/libc++.so" \
+    "${audio_abi}/libc++.so"
+
+set_stage bind-device-runtime
+# The TFA speaker codec requests its device-matched tuning container from ODM.
+bind_file_read_only "${odm_root}/firmware/tfa98xx.cnt" \
+    "/odm/firmware/tfa98xx.cnt"
+bind_file_read_only \
+    "${vendor_root}/etc/seccomp_policy/vendor.qti.hardware.dsp.policy" \
+    "/vendor/etc/seccomp_policy/vendor.qti.hardware.dsp.policy"
+
+# Keep AERA's vendor tree and GPU userspace visible. Qualcomm's matching
+# library directory is exposed under /vendor so the vendor linker namespace
+# accepts it, without overlaying /vendor or disturbing a running/restarted UI.
+set_stage expose-stock-libraries
+if ! grep -q ' /vendor/aera-stock-lib64 ' /proc/mounts; then
+    mount -o bind "${vendor_root}/lib64" /vendor/aera-stock-lib64 || \
+        fail "could not expose the installed stock audio libraries"
+    mount -o remount,bind,ro /vendor/aera-stock-lib64 2>/dev/null
+fi
+
+# The modem partition owns the ADSP images and service-locator JSON files.
+# Recovery normally unmounts it after the PMIC bootstrap, so restore it for
+# the long-lived audio DSP and expose the path expected by Qualcomm userspace.
+set_stage expose-firmware
+if ! grep -q ' /firmware ' /proc/mounts; then
+    modem="/dev/block/bootdevice/by-name/modem${slot_suffix}"
+    [ -b "${modem}" ] || modem="/dev/block/by-name/modem${slot_suffix}"
+    [ -b "${modem}" ] || fail "the active modem firmware partition is missing"
+    mount -t vfat -o ro "${modem}" /firmware || \
+        fail "could not mount the ADSP firmware partition"
+fi
+if ! grep -q ' /vendor/firmware_mnt ' /proc/mounts; then
+    mount -o bind /firmware /vendor/firmware_mnt || \
+        fail "could not expose ADSP firmware to stock vendor"
+fi
+
+# AGM prefers the device-specific ODM calibration database. Recovery already
+# owns /odm as a rootfs directory, so expose only the required stock subtree.
+set_stage expose-calibration
+[ -d "${odm_root}/etc/acdbdata" ] || \
+    fail "missing stock ODM audio calibration database"
+mkdir -p /odm/etc/acdbdata
+if ! grep -q ' /odm/etc/acdbdata ' /proc/mounts; then
+    mount -o bind "${odm_root}/etc/acdbdata" /odm/etc/acdbdata || \
+        fail "could not expose the stock ODM audio calibration database"
+    mount -o remount,bind,ro /odm/etc/acdbdata 2>/dev/null
+fi
+
+# Keep the vendor calibration files available for codecs which use them.
+if [ -d "${vendor_root}/etc/acdbdata" ] && \
+   ! grep -q ' /vendor/etc/acdbdata ' /proc/mounts; then
+    mount -o bind "${vendor_root}/etc/acdbdata" /vendor/etc/acdbdata || \
+        fail "could not expose the stock calibration database"
+fi
+if [ -d "${vendor_root}/etc/audio" ] && \
+   ! grep -q ' /vendor/etc/audio ' /proc/mounts; then
+    mount -o bind "${vendor_root}/etc/audio" /vendor/etc/audio || \
+        fail "could not expose the stock audio service configuration"
+fi
+
+# Waffle's ODM owns the final Pineapple routes and speaker configuration.
+# Recovery does not publish Android's vendor SKU selection, so expose those
+# device-specific files at the filenames selected by the stock PAL runtime.
+for config in mixer_paths resourcemanager; do
+    bind_file_read_only "${odm_root}/etc/${config}.xml" \
+        "/vendor/etc/${config}_pineapple_mtp.xml"
+done
+bind_file_read_only "${odm_root}/etc/usecaseKvManager.xml" \
+    "/vendor/etc/usecaseKvManager.xml"
+bind_file_read_only "${odm_root}/etc/plugin_config.xml" \
+    "/vendor/etc/plugin_manager.xml"
+
+# Oplus speaker processing is loaded into AudioPD on demand. Prefer Waffle's
+# ODM modules, with the vendor RFSA directory as a stock-layout fallback.
+rfsa_source="${odm_root}/lib/rfsa/adsp"
+[ -d "${rfsa_source}" ] || rfsa_source="${vendor_root}/lib/rfsa/adsp"
+if ! grep -q ' /vendor/lib/rfsa/adsp ' /proc/mounts; then
+    mount -o bind "${rfsa_source}" /vendor/lib/rfsa/adsp || \
+        fail "could not expose the stock AudioPD modules"
+    mount -o remount,bind,ro /vendor/lib/rfsa/adsp 2>/dev/null
+fi
+for config in card-defs.xml mem_logger_config.xml; do
+    source_config="${vendor_root}/etc/${config}"
+    target_config="/vendor/etc/${config}"
+    [ -f "${source_config}" ] && [ -f "${target_config}" ] && \
+        mount -o bind "${source_config}" "${target_config}" 2>/dev/null
+done
+
+mkdir -p /data/vendor/audio/acdbdata/delta /data/vendor/audio_dsp
+
+start_init_service() {
+    service="$1"
+    required="$2"
+    audio_stage="start-${service}"
+    log_message i "stage=${audio_stage}"
+    state="$(getprop "init.svc.${service}")"
+    if [ "${state}" = running ]; then
+        log_message i "service=${service} state=running (already active)"
+        return 0
+    fi
+    setprop ctl.start "${service}"
+    attempt=0
+    while [ "$(getprop "init.svc.${service}")" != running ] && \
+          [ "${attempt}" -lt 50 ]; do
+        attempt=$((attempt + 1))
+        sleep 0.1
+    done
+    if [ "$(getprop "init.svc.${service}")" = running ]; then
+        log_message i "service=${service} state=running"
+        return 0
+    fi
+    [ "${required}" = required ] && fail "init service ${service} did not start"
+    echo "AERA audio: optional service ${service} is unavailable" >&2
+    return 0
+}
+
+start_adsp() {
+    audio_stage=start-adsp
+    log_message i "stage=${audio_stage}"
+    adsp_remoteproc=""
+    for candidate in /sys/class/remoteproc/remoteproc*; do
+        [ -r "${candidate}/name" ] || continue
+        case "$(cat "${candidate}/name")" in
+            *remoteproc-adsp)
+                adsp_remoteproc="${candidate}"
+                break
+                ;;
+        esac
+    done
+    [ -n "${adsp_remoteproc}" ] || fail "could not find the ADSP remoteproc"
+
+    if [ "$(cat "${adsp_remoteproc}/state" 2>/dev/null)" != running ]; then
+        echo start > "${adsp_remoteproc}/state" || fail "could not boot the ADSP"
+    fi
+
+    attempt=0
+    while [ "$(cat "${adsp_remoteproc}/state" 2>/dev/null)" != running ] && \
+          [ "${attempt}" -lt 100 ]; do
+        attempt=$((attempt + 1))
+        sleep 0.1
+    done
+    [ "$(cat "${adsp_remoteproc}/state" 2>/dev/null)" = running ] || \
+        fail "the ADSP did not enter the running state"
+    log_message i "ADSP state=running path=${adsp_remoteproc}"
+}
+
+# These must precede the SPF/machine probe. In particular audioadsprpcd
+# creates Qualcomm's audiopd and its APM endpoint. Running it through init
+# also gives it the stock SELinux domain instead of recovery/su.
+start_init_service aera-pd-mapper required
+start_init_service aera-dspservice required
+start_init_service aera-audioadsprpcd required
+start_adsp
+
+set_stage wait-machine-card
+attempt=0
+# card 100 is tinyalsa's virtual AGM plugin id; the kernel machine card itself
+# is allocated a normal ALSA index (normally controlC0).
+while [ ! -e /dev/snd/controlC0 ] && [ "${attempt}" -lt 200 ]; do
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+[ -e /dev/snd/controlC0 ] || fail "the Qualcomm machine sound card did not register"
+
+# The init service owns the stock-library environment. Do not export it here:
+# recovery's toolbox/getprop/setprop require AERA's matching system libraries.
+set_stage start-agm
+start_init_service aera-agm-service required
+
+set_stage complete
+log_message i "Waffle AGM backend is ready"

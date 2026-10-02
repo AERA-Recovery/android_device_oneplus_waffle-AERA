@@ -31,6 +31,17 @@ PRODUCT_EXTRA_RECOVERY_KEYS += \
 # Soong namespaces
 PRODUCT_SOONG_NAMESPACES += $(LOCAL_PATH)
 
-# some OrangeFox-specific settings
-$(call inherit-product, $(LOCAL_PATH)/fox_waffle.mk)
+PRODUCT_PACKAGES += \
+    aera-audio-bridge \
+    aera-audio-service \
+    aera-browser-jail \
+    aera-gpu-probe
+
+# Waffle's matching Adreno 750 userspace and allocator are bundled in this
+# device tree. Other devices retain AERA's software-renderer fallback.
+PRODUCT_VENDOR_PROPERTIES += \
+    ro.hardware.egl=adreno
+
+# AERA recovery settings
+$(call inherit-product, $(LOCAL_PATH)/aera_waffle.mk)
 #

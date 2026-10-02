@@ -1,45 +1,33 @@
-# OnePlus 12 waffle OrangeFox device tree
+# OnePlus 12 (waffle) AERA device tree
 
-## Working
+## Bring-up targets
 
-- [?] Display
-- [?] Touch 
-- [?] Decryption
-- [?] Flashing
-- [?] Backup & Restore
-- [?] KernelSU, KernelSU Next & SukiSU Ultra Installer
-- [?] MTP/OTG Storage
-- [?] ADB/FastbootD
-- [?] Factory Reset
-- [?] Vibrator
-- [?] Display & Vibration Settings
-- [?] Flashlight
+- Display and touch
+- Android 16 FBE decryption
+- ADB, MTP, OTG and Fastbootd
+- Backup, restore, flashing and format
+- Wi-Fi
+- AIDL haptics and flashlight
+- Device-matched Adreno 750 graphics acceleration
+- Qualcomm PAL/AGM audio for AERA media plugins
 
-## Not working
-
-- [ ] ???????
-
-# How To Build
+# Build
 
 ### Clone & Sync Source
 ```
-mkdir -p ~/android/OrangeFox_16
-cd ~/android/OrangeFox_16
-git clone https://github.com/OrangeFox16/sync.git
-cd sync
-./orangefox_sync.sh --branch 16.0 --path ~/android/fox_16.0
+mkdir -p ~/android/AERA_16.0
+cd ~/android/AERA_16.0
+repo init -u https://github.com/AERA-Recovery/android_manifest -b aera-16.0
+repo sync -c -j$(nproc --all)
 ```
 ### Clone Device-tree
 ```
-cd ~/android/fox_16.0/device
-mkdir -p oneplus
-cd oneplus
-git clone https://github.com/koaaN/android_device_waffle-orangefox -b fox_16.0 waffle
+git clone <AERA waffle device-tree URL> device/oneplus/waffle
 ```
 ### BUILD!
 ```
-cd ~/android/fox_16.0
+cd ~/android/AERA_16.0
 source build/envsetup.sh
 lunch twrp_waffle-bp2a-eng
-mka adbd recoveryimage
+mka recoveryimage
 ```
