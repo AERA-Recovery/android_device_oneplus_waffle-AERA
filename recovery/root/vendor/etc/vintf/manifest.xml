@@ -7,6 +7,21 @@
         <name>android.hardware.gatekeeper</name>
         <fqname>IGatekeeper/default</fqname>
     </hal>
+    <hal format="hidl">
+        <name>vendor.qti.hardware.dsp</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.0::IDspService/dspservice</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>vendor.qti.hardware.AGMIPC</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.0::IAGM/default</fqname>
+    </hal>
+    <hal format="hidl">
+        <name>vendor.qti.hardware.pal</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.0::IPAL/default</fqname>
+    </hal>
     <sepolicy>
         <version>34.0</version>
     </sepolicy>

@@ -1,2 +1,16 @@
 <manifest version="8.0" type="framework">
+    <!--
+        Waffle's stock Adreno userspace still discovers the graphics mapper
+        through HIDL. Declaring the framework service keeps hwservicemanager
+        available so the vendor passthrough mapper can be loaded in recovery.
+    -->
+    <hal format="hidl">
+        <name>android.hidl.manager</name>
+        <transport>hwbinder</transport>
+        <version>1.2</version>
+        <interface>
+            <name>IServiceManager</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
 </manifest>

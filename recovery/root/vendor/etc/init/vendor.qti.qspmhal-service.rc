@@ -1,0 +1,9 @@
+service vendor.qspmhal /vendor/bin/vendor.qti.qspmhal-service
+    class hal
+    user system
+    group system
+    seclabel u:r:recovery:s0
+    interface aidl vendor.qti.qspmhal.IQspmhal/default
+
+on post-fs-data
+    mkdir /data/vendor/gaming 0770 root system

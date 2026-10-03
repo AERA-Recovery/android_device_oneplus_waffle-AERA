@@ -11,7 +11,10 @@ stock_root=/mnt/aera-stock
 vendor_root=${stock_root}/vendor
 system_root=${stock_root}/system
 odm_root=${stock_root}/odm
-audio_abi=/vendor/aera-audio-abi
+recovery_odm_root=/vendor/odm
+stable_vendor=/system/aera-audio-vendor
+stable_system_lib64=/system/aera-audio-system-lib64
+stable_odm=/odm
 lock=${stock_root}/.audio-lock
 slot_suffix="$(getprop ro.boot.slot_suffix)"
 audio_stage=bootstrap-start
@@ -44,14 +47,26 @@ case "$(getprop ro.product.device)" in
         ;;
 esac
 
+# Browser and media clients may request the backend more than once during a
+# recovery session.  Restarting AudioPD underneath the live PAL/AGM host makes
+# its sound card go offline and leaves subsequent graph opens stale.  Keep the
+# established service and DSP state intact once initialization has completed.
+if [ "$(getprop init.svc.aera-agm-service)" = running ]; then
+    log_message i "backend already active; keeping the live ADSP/PAL state"
+    exit 0
+fi
+
 set_stage prepare-layout
 mkdir -p "${stock_root}" "${vendor_root}" "${system_root}" "${odm_root}" \
-    /odm/firmware /firmware \
+    "${recovery_odm_root}/firmware" "${recovery_odm_root}/etc/acdbdata" \
+    /firmware \
     /vendor/firmware_mnt /vendor/dsp /vendor/lib/rfsa/adsp \
     /vendor/etc/acdbdata \
     /vendor/etc/audio \
-    "${audio_abi}" /vendor/etc/seccomp_policy
-chmod 0755 "${stock_root}" /odm/firmware /vendor/lib /vendor/lib/rfsa
+    "${stable_vendor}" "${stable_system_lib64}" /vendor/etc/seccomp_policy
+chmod 0755 "${stock_root}" "${recovery_odm_root}/firmware" \
+    "${recovery_odm_root}/etc" "${recovery_odm_root}/etc/acdbdata" \
+    /vendor/lib /vendor/lib/rfsa
 lock_attempt=0
 while ! mkdir "${lock}" 2>/dev/null; do
     [ "$(getprop init.svc.aera-agm-service)" = running ] && exit 0
@@ -109,9 +124,11 @@ fi
     fail "could not expose the stock /dsp path"
 
 # Qualcomm's audio processes are built against Waffle's framework Binder ABI.
-# Recovery bundles the matching Binder/C++ snapshot and overlays it with the
-# installed stock equivalents when available, without replacing /system.
-set_stage bind-framework-abi
+# Keep both the installed vendor tree and its matching framework libraries on
+# stable /system paths. Recovery may replace or detach its /vendor view while
+# finishing decryption; init services launched through /vendor can therefore
+# disappear halfway through this bootstrap.
+set_stage expose-stock-runtime
 system_lib64="${system_root}/system/lib64"
 [ -f "${system_lib64}/libbinder.so" ] || system_lib64="${system_root}/lib64"
 bind_file_read_only() {
@@ -126,30 +143,29 @@ bind_file_read_only() {
         mount -o remount,bind,ro "${target_file}" 2>/dev/null
     fi
 }
-bind_file_read_only "${system_lib64}/libbinder.so" \
-    "${audio_abi}/libbinder.so"
-bind_file_read_only "${system_lib64}/libbinder_ndk.so" \
-    "${audio_abi}/libbinder_ndk.so"
-bind_file_read_only "${system_lib64}/libc++.so" \
-    "${audio_abi}/libc++.so"
+if ! grep -q " ${stable_vendor} " /proc/mounts; then
+    mount -o bind "${vendor_root}" "${stable_vendor}" || \
+        fail "could not expose the installed vendor audio runtime"
+    mount -o remount,bind,ro "${stable_vendor}" 2>/dev/null
+fi
+if ! grep -q " ${stable_system_lib64} " /proc/mounts; then
+    mount -o bind "${system_lib64}" "${stable_system_lib64}" || \
+        fail "could not expose the installed framework audio ABI"
+    mount -o remount,bind,ro "${stable_system_lib64}" 2>/dev/null
+fi
+if ! grep -q " ${stable_odm} " /proc/mounts; then
+    mount -o bind "${odm_root}" "${stable_odm}" || \
+        fail "could not expose the installed ODM audio runtime"
+    mount -o remount,bind,ro "${stable_odm}" 2>/dev/null
+fi
 
 set_stage bind-device-runtime
 # The TFA speaker codec requests its device-matched tuning container from ODM.
 bind_file_read_only "${odm_root}/firmware/tfa98xx.cnt" \
-    "/odm/firmware/tfa98xx.cnt"
+    "${recovery_odm_root}/firmware/tfa98xx.cnt"
 bind_file_read_only \
     "${vendor_root}/etc/seccomp_policy/vendor.qti.hardware.dsp.policy" \
     "/vendor/etc/seccomp_policy/vendor.qti.hardware.dsp.policy"
-
-# Keep AERA's vendor tree and GPU userspace visible. Qualcomm's matching
-# library directory is exposed under /vendor so the vendor linker namespace
-# accepts it, without overlaying /vendor or disturbing a running/restarted UI.
-set_stage expose-stock-libraries
-if ! grep -q ' /vendor/aera-stock-lib64 ' /proc/mounts; then
-    mount -o bind "${vendor_root}/lib64" /vendor/aera-stock-lib64 || \
-        fail "could not expose the installed stock audio libraries"
-    mount -o remount,bind,ro /vendor/aera-stock-lib64 2>/dev/null
-fi
 
 # The modem partition owns the ADSP images and service-locator JSON files.
 # Recovery normally unmounts it after the PMIC bootstrap, so restore it for
@@ -167,16 +183,20 @@ if ! grep -q ' /vendor/firmware_mnt ' /proc/mounts; then
         fail "could not expose ADSP firmware to stock vendor"
 fi
 
-# AGM prefers the device-specific ODM calibration database. Recovery already
-# owns /odm as a rootfs directory, so expose only the required stock subtree.
+# AGM prefers the device-specific ODM calibration database. Recovery's /odm
+# compatibility paths resolve into /vendor/odm, so mount onto that real path
+# directly instead of asking mount(2) to traverse the /odm/etc symlink.
 set_stage expose-calibration
 [ -d "${odm_root}/etc/acdbdata" ] || \
     fail "missing stock ODM audio calibration database"
-mkdir -p /odm/etc/acdbdata
-if ! grep -q ' /odm/etc/acdbdata ' /proc/mounts; then
-    mount -o bind "${odm_root}/etc/acdbdata" /odm/etc/acdbdata || \
+odm_calibration_target="${recovery_odm_root}/etc/acdbdata"
+mkdir -p "${odm_calibration_target}" || \
+    fail "could not prepare the ODM audio calibration mount point"
+if ! grep -q " ${odm_calibration_target} " /proc/mounts; then
+    mount -o bind "${odm_root}/etc/acdbdata" \
+        "${odm_calibration_target}" || \
         fail "could not expose the stock ODM audio calibration database"
-    mount -o remount,bind,ro /odm/etc/acdbdata 2>/dev/null
+    mount -o remount,bind,ro "${odm_calibration_target}" 2>/dev/null
 fi
 
 # Keep the vendor calibration files available for codecs which use them.
@@ -215,8 +235,7 @@ fi
 for config in card-defs.xml mem_logger_config.xml; do
     source_config="${vendor_root}/etc/${config}"
     target_config="/vendor/etc/${config}"
-    [ -f "${source_config}" ] && [ -f "${target_config}" ] && \
-        mount -o bind "${source_config}" "${target_config}" 2>/dev/null
+    bind_file_read_only "${source_config}" "${target_config}"
 done
 
 mkdir -p /data/vendor/audio/acdbdata/delta /data/vendor/audio_dsp
@@ -262,7 +281,20 @@ start_adsp() {
     done
     [ -n "${adsp_remoteproc}" ] || fail "could not find the ADSP remoteproc"
 
-    if [ "$(cat "${adsp_remoteproc}/state" 2>/dev/null)" != running ]; then
+    # Stock starts audioadsprpcd during early-init, then pd-mapper and ADSP at
+    # early-boot. Recovery has already booted ADSP by the time the installed
+    # stock runtime becomes available after decryption. Restart it once here,
+    # with AudioPD and the service locator already listening, so AudioReach's
+    # APM endpoint is created as part of the DSP boot instead of too late for
+    # the finite SPF probe window.
+    if [ "$(cat "${adsp_remoteproc}/state" 2>/dev/null)" = running ]; then
+        set_stage restart-adsp
+        [ -w /sys/kernel/boot_adsp/ssr ] || \
+            fail "the ADSP restart control is unavailable"
+        echo 1 > /sys/kernel/boot_adsp/ssr || \
+            fail "could not restart the ADSP"
+        sleep 1
+    else
         echo start > "${adsp_remoteproc}/state" || fail "could not boot the ADSP"
     fi
 
@@ -280,9 +312,9 @@ start_adsp() {
 # These must precede the SPF/machine probe. In particular audioadsprpcd
 # creates Qualcomm's audiopd and its APM endpoint. Running it through init
 # also gives it the stock SELinux domain instead of recovery/su.
+start_init_service aera-audioadsprpcd required
 start_init_service aera-pd-mapper required
 start_init_service aera-dspservice required
-start_init_service aera-audioadsprpcd required
 start_adsp
 
 set_stage wait-machine-card
@@ -293,7 +325,31 @@ while [ ! -e /dev/snd/controlC0 ] && [ "${attempt}" -lt 200 ]; do
     attempt=$((attempt + 1))
     sleep 0.1
 done
-[ -e /dev/snd/controlC0 ] || fail "the Qualcomm machine sound card did not register"
+if [ ! -e /dev/snd/controlC0 ]; then
+    for module in swr_haptics_dlkm oplus_audio_tfa98xx_v6 \
+                  msm_ext_display hdmi_dlkm btpower bt_fm_slim \
+                  machine_dlkm; do
+        if grep -q "^${module} " /proc/modules 2>/dev/null; then
+            log_message i "module=${module} state=loaded"
+        else
+            log_message e "module=${module} state=missing"
+        fi
+    done
+
+    # The kernel's deferred-probe list names the exact platform or bus device
+    # still preventing the ASoC card from binding.  It is present only when
+    # debugfs is enabled, so keep this diagnostic best-effort and failure-only.
+    if [ ! -r /sys/kernel/debug/devices_deferred ]; then
+        mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null || true
+    fi
+    if [ -r /sys/kernel/debug/devices_deferred ]; then
+        while IFS= read -r deferred; do
+            [ -n "${deferred}" ] && log_message e "deferred=${deferred}"
+        done < /sys/kernel/debug/devices_deferred
+    fi
+
+    fail "the Qualcomm machine sound card did not register"
+fi
 
 # The init service owns the stock-library environment. Do not export it here:
 # recovery's toolbox/getprop/setprop require AERA's matching system libraries.

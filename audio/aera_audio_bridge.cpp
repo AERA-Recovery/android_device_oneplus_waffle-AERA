@@ -327,9 +327,13 @@ struct PalApi {
   }
 
   bool Load() {
-    library = dlopen("libar-pal.so", RTLD_NOW | RTLD_LOCAL);
+    // The primary HAL process owns the real PAL runtime. Use Qualcomm's
+    // matching client shim here so each playback child talks to that single
+    // service instead of initializing a second ContextManager/AGM session.
+    library = dlopen("libpalclient.so", RTLD_NOW | RTLD_LOCAL);
     if (!library) {
-      fprintf(stderr, "AERA audio: could not load stock PAL: %s\n", dlerror());
+      fprintf(stderr, "AERA audio: could not load stock PAL client: %s\n",
+              dlerror());
       return false;
     }
     return LoadSymbol("pal_init", &init) &&
@@ -404,8 +408,9 @@ pid_t StartPlayer(const std::string& fifo) {
   if (child != 0) return child;
   prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0);
   setenv("LD_LIBRARY_PATH",
-         "/vendor/aera-audio-abi:/mnt/aera-stock/vendor/lib64:"
-         "/mnt/aera-stock/odm/lib64:/vendor/lib64:/system/lib64", 1);
+         "/system/aera-audio-system-lib64:"
+         "/system/aera-audio-vendor/lib64:"
+         "/mnt/aera-stock/odm/lib64:/system/lib64", 1);
   setenv("ANDROID_ROOT", "/system", 1);
   setenv("ANDROID_DATA", "/data", 1);
   execl(kSelf, "aera-audio-bridge", "--play-fifo", fifo.c_str(), nullptr);

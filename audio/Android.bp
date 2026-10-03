@@ -4,10 +4,10 @@
 cc_binary {
     name: "aera-audio-service",
     recovery: true,
-    srcs: ["aera_agm_service.c"],
+    srcs: ["aera_agm_service.cpp"],
     shared_libs: [
-        "libbinder_ndk",
         "libdl",
+        "libhidlbase",
         "liblog",
     ],
     cflags: [

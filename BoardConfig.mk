@@ -125,6 +125,10 @@ AERA_INCLUDE_ZSTD               := true
 AERA_BRIGHTNESS_PATH      := /sys/class/backlight/panel0-backlight/brightness
 AERA_DEFAULT_BRIGHTNESS   := 2048
 AERA_FRAMERATE            := 120
+# Keep Waffle on its standard 120 Hz command-mode timing in recovery. The
+# preferred connector mode is 60 Hz and can enter a very slow panel update
+# path; this is a fixed mode selection, not LTPO/ADFR control.
+AERA_DRM_FIXED_REFRESH_RATE := 120
 AERA_MAX_BRIGHTNESS       := 4095
 AERA_NO_SCREEN_BLANK      := true
 AERA_SCREEN_BLANK_ON_BOOT := true
@@ -160,10 +164,13 @@ AERA_EXCLUDE_APEX                         := true
 AERA_EXCLUDE_DEFAULT_USB_INIT             := true
 AERA_DEFAULT_LANGUAGE                     := en
 AERA_EXTRA_LANGUAGES                      := true
-# Load the stock Pineapple GPU and audio chain dependency-first. AERA resolves
-# these modules from the active device images, keeping them kernel-matched.
-AERA_LOAD_VENDOR_MODULES := "goodix_core.ko oplus_chg_v2.ko stm_st54se_gpio.ko nxp-nci.ko q6_notifier_dlkm.ko spf_core_dlkm.ko audpkt_ion_dlkm.ko gpr_dlkm.ko audio_pkt_dlkm.ko q6_dlkm.ko adsp_loader_dlkm.ko audio_prm_dlkm.ko q6_pdr_dlkm.ko pinctrl_lpi_dlkm.ko swr_dlkm.ko swr_ctrl_dlkm.ko snd_event_dlkm.ko wcd_core_dlkm.ko wcd9xxx_dlkm.ko machine_dlkm.ko swr_haptics_dlkm.ko lpass_cdc_wsa2_macro_dlkm.ko lpass_cdc_wsa_macro_dlkm.ko lpass_cdc_va_macro_dlkm.ko lpass_cdc_rx_macro_dlkm.ko lpass_cdc_tx_macro_dlkm.ko lpass_cdc_dlkm.ko wcd937x_dlkm.ko wcd937x_slave_dlkm.ko wcd938x_dlkm.ko wcd938x_slave_dlkm.ko wcd9378_dlkm.ko wcd9378_slave_dlkm.ko swr_dmic_dlkm.ko wcd939x_dlkm.ko wcd939x_slave_dlkm.ko oplus_audio_extend.ko oplus_audio_tfa98xx_v6.ko oplus_audio_sipa.ko oplus_audio_sipa_tuning.ko oplus_audio_aw882xx.ko frpc-adsprpc.ko msm_kgsl.ko"
-AERA_POST_DECRYPT_MODULES := "cnss_prealloc.ko cnss_nl.ko wlan_firmware_service.ko cnss_plat_ipc_qmi_svc.ko cnss_utils.ko cnss2.ko rfkill.ko cfg80211.ko gsim.ko rmnet_mem.ko ipam.ko qca_cld3_kiwi_v2.ko"
+# Keep the ADSP loader in the early set: init uses its boot sysfs node while
+# preparing firmware. Load the actual SPF/machine/codec chain post-decrypt so
+# AudioPD can come online during SPF's probe window instead of after it expires.
+# AERA resolves every module from the active device images, keeping it matched
+# to the installed kernel.
+AERA_LOAD_VENDOR_MODULES := "goodix_core.ko oplus_chg_v2.ko stm_st54se_gpio.ko nxp-nci.ko adsp_loader_dlkm.ko msm_kgsl.ko"
+AERA_POST_DECRYPT_MODULES := "cnss_prealloc.ko cnss_nl.ko wlan_firmware_service.ko cnss_plat_ipc_qmi_svc.ko cnss_utils.ko cnss2.ko rfkill.ko cfg80211.ko gsim.ko rmnet_mem.ko ipam.ko qca_cld3_kiwi_v2.ko q6_pdr_dlkm.ko q6_notifier_dlkm.ko snd_event_dlkm.ko gpr_dlkm.ko spf_core_dlkm.ko audpkt_ion_dlkm.ko audio_pkt_dlkm.ko q6_dlkm.ko audio_prm_dlkm.ko pinctrl_lpi_dlkm.ko swr_dlkm.ko swr_ctrl_dlkm.ko slimbus.ko wcd_core_dlkm.ko mbhc_dlkm.ko sdca_registers_dlkm.ko wcd9xxx_dlkm.ko stub_dlkm.ko lpass_cdc_dlkm.ko lpass_cdc_wsa2_macro_dlkm.ko lpass_cdc_wsa_macro_dlkm.ko lpass_cdc_va_macro_dlkm.ko lpass_cdc_rx_macro_dlkm.ko lpass_cdc_tx_macro_dlkm.ko wsa884x_dlkm.ko wsa883x_dlkm.ko wcd937x_dlkm.ko wcd937x_slave_dlkm.ko wcd938x_dlkm.ko wcd938x_slave_dlkm.ko wcd9378_dlkm.ko wcd9378_slave_dlkm.ko wcd939x_dlkm.ko wcd939x_slave_dlkm.ko swr_dmic_dlkm.ko oplus_audio_extend.ko swr_haptics_dlkm.ko oplus_audio_tfa98xx_v6.ko oplus_audio_sipa.ko oplus_audio_sipa_tuning.ko oplus_audio_aw882xx.ko msm_ext_display.ko hdmi_dlkm.ko btpower.ko bt_fm_slim.ko machine_dlkm.ko frpc-adsprpc.ko"
 AERA_LOAD_VENDOR_MODULES_EXCLUDE_GKI      := true
 AERA_LOAD_PREBUILT_MODULES_AT_FIRST       := true
 AERA_LOAD_VENDOR_BOOT_MODULES             := true
